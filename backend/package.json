@@ -1,0 +1,32 @@
+{
+  "name": "youtube-party-backend",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Express API for the YouTube Party app",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "check": "node --check src/index.js && node --check src/app.js && node --check src/config/db.js && node --check src/config/env.js && node --check src/models/Room.js && node --check src/services/room.service.js && node --check src/controllers/room.controller.js && node --check src/routes/rooms.routes.js && node --check src/middleware/errorHandler.js && node --check src/utils/validation.js && node --check src/utils/tokens.js && node --check src/sockets/watchParty.socket.js && node --check src/sockets/playback.js",
+    "test": "node --test \"tests/**/*.test.js\"",
+    "smoke:socket": "node scripts/socket-smoke.mjs",
+    "verify:db": "node scripts/verify-db.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mongoose": "^9.11.4",
+    "socket.io": "^4.8.4",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^11.3.0",
+    "socket.io-client": "^4.8.4",
+    "supertest": "^7.3.1"
+  }
+}
