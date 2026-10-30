@@ -3,7 +3,7 @@ import type { Participant, ParticipantRole } from '../types/room'
 const ROLE_LABEL: Record<ParticipantRole, string> = {
   host: 'Host',
   moderator: 'Moderator',
-  participant: 'Member',
+  participant: 'Participant',
 }
 
 const ROLE_ORDER: Record<ParticipantRole, number> = {
@@ -22,12 +22,25 @@ function initials(name: string): string {
 interface ParticipantListProps {
   participants: Participant[]
   selfUserId: string | null
+  selfRole?: ParticipantRole
+  onAssignRole?: (userId: string, role: 'moderator' | 'participant') => void
+  onTransferHost?: (userId: string) => void
+  onRemoveParticipant?: (userId: string) => void
 }
 
-function ParticipantList({ participants, selfUserId }: ParticipantListProps) {
+function ParticipantList({
+  participants,
+  selfUserId,
+  selfRole = 'participant',
+  onAssignRole,
+  onTransferHost,
+  onRemoveParticipant,
+}: ParticipantListProps) {
   if (participants.length === 0) {
     return <p className="empty-list">No one is here yet.</p>
   }
+
+  const isHost = selfRole === 'host'
 
   const ordered = [...participants].sort((first, second) => {
     if (first.userId === selfUserId) return -1
@@ -62,6 +75,51 @@ function ParticipantList({ participants, selfUserId }: ParticipantListProps) {
                 {ROLE_LABEL[participant.role]}
               </span>
             </span>
+
+            {!isSelf && (
+              <span className="participant-actions">
+                {isHost && participant.role === 'participant' && (
+                  <button
+                    type="button"
+                    className="participant-action-btn"
+                    title="Promote to moderator"
+                    onClick={() => onAssignRole?.(participant.userId, 'moderator')}
+                  >
+                    +Mod
+                  </button>
+                )}
+                {isHost && participant.role === 'moderator' && (
+                  <button
+                    type="button"
+                    className="participant-action-btn"
+                    title="Demote to member"
+                    onClick={() => onAssignRole?.(participant.userId, 'participant')}
+                  >
+                    -Mod
+                  </button>
+                )}
+                {isHost && (
+                  <button
+                    type="button"
+                    className="participant-action-btn"
+                    title="Transfer host status"
+                    onClick={() => onTransferHost?.(participant.userId)}
+                  >
+                    Host
+                  </button>
+                )}
+                {isHost && (
+                  <button
+                    type="button"
+                    className="participant-action-btn participant-action-btn-danger"
+                    title="Remove participant"
+                    onClick={() => onRemoveParticipant?.(participant.userId)}
+                  >
+                    ✕
+                  </button>
+                )}
+              </span>
+            )}
 
             <span
               className={`dot${participant.connected ? ' dot-online' : ''}`}

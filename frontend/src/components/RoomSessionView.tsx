@@ -40,7 +40,18 @@ function RoomSessionView({
   onLeave,
   onRejoin,
 }: RoomSessionViewProps) {
-  const { room, self, status, error, errorCode, retry, leave } = useRoom({
+  const {
+    room,
+    self,
+    status,
+    error,
+    errorCode,
+    retry,
+    leave,
+    assignRole,
+    transferHost,
+    removeParticipant,
+  } = useRoom({
     roomId,
     userId: identity.userId,
     name: identity.name,
@@ -50,26 +61,20 @@ function RoomSessionView({
   const [copied, setCopied] = useState(false)
   const [videoInput, setVideoInput] = useState('')
   const [videoError, setVideoError] = useState<string | null>(null)
-  const [grantTarget, setGrantTarget] = useState('')
 
   const displayRoom = room ?? initialRoom
   const participants = displayRoom.participants
   const selfRole =
     self?.role ?? (identity.userId === displayRoom.hostId ? 'host' : 'participant')
+  const canControl = selfRole === 'host' || selfRole === 'moderator'
 
   const playerRef = useRef<VideoPlayerHandle>(null)
   const sync = usePlaybackSync({
     roomId,
-    userId: identity.userId,
     initialVideoId: displayRoom.videoId,
-    initialControllerId: displayRoom.controllerId ?? displayRoom.hostId,
+    canControl,
     playerRef,
   })
-
-  const controller = participants.find((participant) => participant.userId === sync.controllerId)
-  const controllerName = controller?.name ?? 'the host'
-  const isHost = selfRole === 'host'
-  const others = participants.filter((participant) => participant.userId !== identity.userId)
 
   const copyLink = async () => {
     try {
@@ -98,12 +103,6 @@ function RoomSessionView({
     sync.requestChangeVideo(videoId)
   }
 
-  const grantControl = () => {
-    if (!grantTarget) return
-    sync.requestGrantControl(grantTarget)
-    setGrantTarget('')
-  }
-
   const showError = Boolean(error) && (status === 'error' || status === 'reconnecting')
 
   return (
@@ -122,7 +121,11 @@ function RoomSessionView({
 
         <div className="room-topbar-actions">
           <span className={`role-badge role-${selfRole}`}>
-            {selfRole === 'host' ? 'You are host' : 'You are a member'}
+            {selfRole === 'host'
+              ? 'Host'
+              : selfRole === 'moderator'
+                ? 'Moderator'
+                : 'Participant'}
           </span>
           <button type="button" className="button button-ghost" onClick={handleLeave}>
             Leave room
@@ -134,7 +137,7 @@ function RoomSessionView({
         <div className={`notice ${status === 'error' ? 'notice-error' : 'notice-warn'}`}>
           <p>{error}</p>
           <div className="notice-actions">
-            {errorCode === 'room_not_found' ? (
+            {errorCode === 'room_not_found' || errorCode === 'kicked' ? (
               <button type="button" className="button button-sm" onClick={onLeave}>
                 Back to home
               </button>
@@ -177,7 +180,7 @@ function RoomSessionView({
             <span className="hint">
               {sync.canControl
                 ? 'You control playback for everyone'
-                : `${controllerName} controls playback`}
+                : 'Host and moderators control playback'}
             </span>
           </div>
 
@@ -188,6 +191,9 @@ function RoomSessionView({
             title={`Room ${displayRoom.roomId} video`}
             canControl={sync.canControl}
             onReady={sync.onPlayerReady}
+            onStateChange={sync.onPlayerStateChange}
+            onEnded={sync.onPlayerEnded}
+            onLocalPlay={sync.enablePlayback}
             onTimeUpdate={sync.onTimeUpdate}
             onUserPlay={sync.requestPlay}
             onUserPause={sync.requestPause}
@@ -210,46 +216,6 @@ function RoomSessionView({
           )}
           {videoError && <p className="hint form-error">{videoError}</p>}
 
-          {isHost && others.length > 0 && (
-            <div className="sync-controls">
-              <div className="sync-controls-row">
-                <label className="hint" htmlFor="grant-control">
-                  Give playback control
-                </label>
-                <select
-                  id="grant-control"
-                  value={grantTarget}
-                  onChange={(event) => setGrantTarget(event.target.value)}
-                >
-                  <option value="">Choose a participant…</option>
-                  {others.map((participant) => (
-                    <option key={participant.userId} value={participant.userId}>
-                      {participant.name}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="button button-sm"
-                  onClick={grantControl}
-                  disabled={!grantTarget}
-                >
-                  Give control
-                </button>
-              </div>
-
-              {sync.controllerId !== identity.userId && (
-                <button
-                  type="button"
-                  className="button button-ghost button-sm"
-                  onClick={() => sync.requestGrantControl(identity.userId)}
-                >
-                  Take back control
-                </button>
-              )}
-            </div>
-          )}
-
           {import.meta.env.DEV && (
             <p className="hint sync-hud">
               sync · seq {sync.seq} · drift {sync.driftMs === null ? '—' : `${sync.driftMs} ms`}
@@ -264,7 +230,14 @@ function RoomSessionView({
             </h2>
           </div>
 
-          <ParticipantList participants={participants} selfUserId={identity.userId} />
+          <ParticipantList
+            participants={participants}
+            selfUserId={identity.userId}
+            selfRole={selfRole}
+            onAssignRole={(targetUserId, role) => void assignRole(targetUserId, role)}
+            onTransferHost={(targetUserId) => void transferHost(targetUserId)}
+            onRemoveParticipant={(targetUserId) => void removeParticipant(targetUserId)}
+          />
 
           <p className="status-line">
             <span className={`dot${status === 'connected' ? ' dot-online' : ''}`} aria-hidden="true" />

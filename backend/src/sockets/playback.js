@@ -27,6 +27,20 @@ export function isPlaybackController(room, userId) {
   return Boolean(userId) && controllerOf(room) === userId
 }
 
+/** Host and Moderator can control video playback; Participants cannot. */
+export function canControlPlayback(room, userId) {
+  if (!userId) return false
+  if (typeof room.canControlPlayback === 'function') {
+    return room.canControlPlayback(userId)
+  }
+  if (room.hostId === userId) return true
+  const participant = typeof room.getParticipant === 'function' ? room.getParticipant(userId) : null
+  if (participant && (participant.role === 'host' || participant.role === 'moderator')) {
+    return true
+  }
+  return false
+}
+
 /**
  * Authoritative state at `now`. When playing, the position is extrapolated from
  * the last saved anchor, so a late joiner starts at the right second.
@@ -109,10 +123,10 @@ async function runCommand(io, socket, ack, apply) {
     const room = await loadJoinedRoom(socket, ack)
     if (!room) return
 
-    if (!isPlaybackController(room, socket.data.userId)) {
+    if (!canControlPlayback(room, socket.data.userId)) {
       return reply(
         ack,
-        fail('forbidden', 'Only the participant with playback control can do that'),
+        fail('forbidden', 'Only hosts and moderators can control playback'),
       )
     }
 
@@ -120,6 +134,7 @@ async function runCommand(io, socket, ack, apply) {
     if (!mutation.ok) return reply(ack, fail(mutation.code, mutation.message))
 
     const now = Date.now()
+    room.controllerId = socket.data.userId
     room.seq = (room.seq ?? 0) + 1
     room.playbackUpdatedAt = new Date(now)
     room.markActivity()
@@ -170,6 +185,15 @@ function attachCommands(io, socket) {
     })
   })
 
+  socket.on('playback_ended', (payload, ack) => {
+    void runCommand(io, socket, ack, (room) => {
+      const position = readPosition(payload)
+      room.currentTime = position !== null ? position : room.currentTime
+      room.playbackStatus = 'ended'
+      return { ok: true }
+    })
+  })
+
   socket.on('playback_seek', (payload, ack) => {
     void runCommand(io, socket, ack, (room) => {
       const position = readPosition(payload)
@@ -205,8 +229,11 @@ function attachControlTransfer(io, socket) {
       const room = await loadJoinedRoom(socket, ack)
       if (!room) return
 
-      if (room.hostId !== socket.data.userId) {
-        return reply(ack, fail('forbidden', 'Only the host can change playback control'))
+      if (!room.canModerate(socket.data.userId)) {
+        return reply(
+          ack,
+          fail('forbidden', 'Only the host or a moderator can change playback control'),
+        )
       }
 
       const targetId = typeof payload?.userId === 'string' ? payload.userId.trim() : ''

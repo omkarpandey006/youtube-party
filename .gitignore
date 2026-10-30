@@ -53,3 +53,4 @@ Thumbs.db
 *.pem
 .vercel
 .netlify
+DEPLOYMENT.md

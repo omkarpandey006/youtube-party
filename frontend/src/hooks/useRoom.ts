@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, joinRoom as joinRoomApi } from '../services/api'
 import { saveRoomIdentity } from '../services/session'
-import { acquireWatchPartySocket, releaseWatchPartySocket } from '../socket/socket'
-import type { SocketResult, WatchPartySocket } from '../socket/socket'
+import {
+  acquireWatchPartySocket,
+  releaseWatchPartySocket,
+  type HostTransferredPayload,
+  type KickedPayload,
+  type RoleAssignedPayload,
+  type SocketResult,
+  type WatchPartySocket,
+} from '../socket/socket'
 import type { Participant, Room, RoomSelf, RoomSession } from '../types/room'
 
 export type RoomStatus = 'connecting' | 'connected' | 'reconnecting' | 'error'
@@ -15,6 +22,9 @@ export interface UseRoomResult {
   errorCode: string | null
   retry: () => void
   leave: () => void
+  assignRole: (targetUserId: string, role: 'moderator' | 'participant') => Promise<void>
+  transferHost: (targetUserId: string) => Promise<void>
+  removeParticipant: (targetUserId: string) => Promise<void>
 }
 
 interface UseRoomArgs {
@@ -67,8 +77,19 @@ export function useRoom({ roomId, userId, name, token }: UseRoomArgs): UseRoomRe
     const socket = acquireWatchPartySocket()
     socketRef.current = socket
 
-    const updateParticipants = (participants: Participant[]) => {
-      setRoom((current) => (current ? { ...current, participants } : current))
+    const updateParticipants = (participants: Participant[], newHostId?: string) => {
+      setRoom((current) => {
+        if (!current) return current
+        return {
+          ...current,
+          participants,
+          ...(newHostId ? { hostId: newHostId } : {}),
+        }
+      })
+      const me = participants.find((p) => p.userId === userId)
+      if (me) {
+        setSelf((prev) => (prev ? { ...prev, role: me.role } : { userId, role: me.role }))
+      }
     }
 
     const emitJoin = () =>
@@ -166,6 +187,24 @@ export function useRoom({ roomId, userId, name, token }: UseRoomArgs): UseRoomRe
       if (!disposedRef.current) updateParticipants(payload.participants)
     }
 
+    const handleHostTransferred = (payload: HostTransferredPayload) => {
+      if (disposedRef.current) return
+      updateParticipants(payload.participants, payload.newHostId)
+    }
+
+    const handleRoleAssigned = (payload: RoleAssignedPayload) => {
+      if (disposedRef.current) return
+      updateParticipants(payload.participants)
+    }
+
+    const handleKicked = (payload: KickedPayload) => {
+      if (disposedRef.current) return
+      joinedRef.current = false
+      setStatus('error')
+      setError(payload.reason || 'You were removed from the room.')
+      setErrorCode('kicked')
+    }
+
     const handleDisconnect = (reason: string) => {
       if (disposedRef.current) return
       if (reason === 'io client disconnect') return
@@ -191,6 +230,9 @@ export function useRoom({ roomId, userId, name, token }: UseRoomArgs): UseRoomRe
     socket.on('participant_joined', handleParticipants)
     socket.on('participant_updated', handleParticipants)
     socket.on('participant_left', handleParticipants)
+    socket.on('host_transferred', handleHostTransferred)
+    socket.on('role_assigned', handleRoleAssigned)
+    socket.on('kicked', handleKicked)
     socket.on('disconnect', handleDisconnect)
     socket.on('connect_error', handleConnectError)
     socket.io.on('reconnect_attempt', handleReconnectAttempt)
@@ -215,6 +257,9 @@ export function useRoom({ roomId, userId, name, token }: UseRoomArgs): UseRoomRe
       socket.off('participant_joined', handleParticipants)
       socket.off('participant_updated', handleParticipants)
       socket.off('participant_left', handleParticipants)
+      socket.off('host_transferred', handleHostTransferred)
+      socket.off('role_assigned', handleRoleAssigned)
+      socket.off('kicked', handleKicked)
       socket.off('disconnect', handleDisconnect)
       socket.off('connect_error', handleConnectError)
       socket.io.off('reconnect_attempt', handleReconnectAttempt)
@@ -247,5 +292,55 @@ export function useRoom({ roomId, userId, name, token }: UseRoomArgs): UseRoomRe
     window.setTimeout(() => socket.disconnect(), 400)
   }, [])
 
-  return { room, self, status, error, errorCode, retry, leave }
+  const assignRole = useCallback(
+    (targetUserId: string, role: 'moderator' | 'participant') =>
+      new Promise<void>((resolve, reject) => {
+        const socket = socketRef.current
+        if (!socket) return reject(new Error('Not connected'))
+        socket.emit('assign_role', { userId: targetUserId, role }, (result) => {
+          if (result.ok) resolve()
+          else reject(new Error(result.message))
+        })
+      }),
+    [],
+  )
+
+  const transferHost = useCallback(
+    (targetUserId: string) =>
+      new Promise<void>((resolve, reject) => {
+        const socket = socketRef.current
+        if (!socket) return reject(new Error('Not connected'))
+        socket.emit('transfer_host', { userId: targetUserId }, (result) => {
+          if (result.ok) resolve()
+          else reject(new Error(result.message))
+        })
+      }),
+    [],
+  )
+
+  const removeParticipant = useCallback(
+    (targetUserId: string) =>
+      new Promise<void>((resolve, reject) => {
+        const socket = socketRef.current
+        if (!socket) return reject(new Error('Not connected'))
+        socket.emit('remove_participant', { userId: targetUserId }, (result) => {
+          if (result.ok) resolve()
+          else reject(new Error(result.message))
+        })
+      }),
+    [],
+  )
+
+  return {
+    room,
+    self,
+    status,
+    error,
+    errorCode,
+    retry,
+    leave,
+    assignRole,
+    transferHost,
+    removeParticipant,
+  }
 }

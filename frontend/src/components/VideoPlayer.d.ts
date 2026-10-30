@@ -23,6 +23,7 @@ export interface VideoPlayerHandle {
   getPlayerState: () => number
   setPlaybackRate: (rate: number) => void
   getPlaybackRate: () => number
+  isReady: () => boolean
 }
 
 export interface VideoPlayerProps {
@@ -34,6 +35,8 @@ export interface VideoPlayerProps {
   onStateChange?: (payload: VideoPlayerStateChange) => void
   onTimeUpdate?: (payload: VideoPlayerTimeUpdate) => void
   onError?: (payload: VideoPlayerError) => void
+  onEnded?: () => void
+  onLocalPlay?: () => void
   /** Synced mode: controls ask the server instead of touching the player. */
   onUserPlay?: () => void
   onUserPause?: () => void

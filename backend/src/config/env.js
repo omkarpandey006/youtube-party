@@ -18,7 +18,12 @@ export const env = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
   port: readNumber(process.env.PORT, 5000),
   clientOrigin: process.env.CLIENT_ORIGIN ?? 'http://localhost:5173',
-  allowedOrigins: readList(process.env.CLIENT_ORIGIN, ['http://localhost:5173']),
+  allowedOrigins: readList(
+    process.env.CLIENT_ORIGIN,
+    ['http://localhost:5173', process.env.RENDER_EXTERNAL_URL, process.env.PUBLIC_URL, process.env.APP_URL].filter(
+      Boolean,
+    ),
+  ),
 
   socket: {
     // How long a participant token stays valid (default 12 hours).

@@ -1,5 +1,5 @@
 import { io, type Socket } from 'socket.io-client'
-import type { Participant, PlaybackStatus, Room, RoomSession } from '../types/room'
+import type { Participant, ParticipantRole, PlaybackStatus, Room, RoomSession } from '../types/room'
 
 export type {
   Participant,
@@ -53,6 +53,26 @@ export interface ControlChangedPayload {
   hostId: string
 }
 
+export interface RoleAssignedPayload {
+  roomId: string
+  userId: string
+  role: ParticipantRole
+  participants: Participant[]
+}
+
+export interface HostTransferredPayload {
+  roomId: string
+  previousHostId: string
+  newHostId: string
+  participants: Participant[]
+  fallback?: boolean
+}
+
+export interface KickedPayload {
+  roomId: string
+  reason: string
+}
+
 type Ack<T> = (result: SocketResult<T>) => void
 
 export interface ServerToClientEvents {
@@ -75,6 +95,9 @@ export interface ServerToClientEvents {
   }) => void
   playback_state: (payload: PlaybackStatePayload) => void
   control_changed: (payload: ControlChangedPayload) => void
+  role_assigned: (payload: RoleAssignedPayload) => void
+  host_transferred: (payload: HostTransferredPayload) => void
+  kicked: (payload: KickedPayload) => void
 }
 
 export interface ClientToServerEvents {
@@ -90,14 +113,23 @@ export interface ClientToServerEvents {
   ) => void
   playback_play: (payload: { position: number }, ack: Ack<PlaybackCommandAck>) => void
   playback_pause: (payload: { position: number }, ack: Ack<PlaybackCommandAck>) => void
+  playback_ended: (payload: { position: number }, ack: Ack<PlaybackCommandAck>) => void
   playback_seek: (payload: { position: number }, ack: Ack<PlaybackCommandAck>) => void
   playback_change_video: (
     payload: { videoId: string },
     ack: Ack<PlaybackCommandAck>,
   ) => void
-  playback_grant_control: (
+  assign_role: (
+    payload: { userId: string; role: 'moderator' | 'participant' },
+    ack: Ack<{ userId: string; role: ParticipantRole; participants: Participant[] }>,
+  ) => void
+  transfer_host: (
     payload: { userId: string },
-    ack: Ack<ControlChangedPayload>,
+    ack: Ack<{ hostId: string; participants: Participant[] }>,
+  ) => void
+  remove_participant: (
+    payload: { userId: string },
+    ack: Ack<{ userId: string; removed: boolean; participants: Participant[] }>,
   ) => void
 }
 

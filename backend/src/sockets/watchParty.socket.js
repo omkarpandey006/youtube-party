@@ -12,6 +12,13 @@ import {
   stopAllHeartbeats,
   stopRoomHeartbeat,
 } from './playback.js'
+import {
+  attachRoleHandlers,
+  cancelHostFallback,
+  findSuccessor,
+  scheduleHostFallback,
+  stopAllHostFallbacks,
+} from './roles.js'
 
 /**
  * In-memory presence registry: roomId -> userId -> Set<socketId>.
@@ -51,6 +58,26 @@ function removeConnection(roomId, userId, socketId) {
   users.delete(userId)
   if (users.size === 0) roomConnections.delete(roomId)
   return { socketsLeft: 0 }
+}
+
+export function evictUserFromRoom(io, roomId, userId, reason) {
+  const normRoomId = normalizeRoomCode(roomId)
+  const users = roomConnections.get(normRoomId)
+  if (!users) return
+  const sockets = users.get(userId)
+  if (!sockets) return
+
+  for (const socketId of sockets) {
+    const s = io.sockets.sockets.get(socketId)
+    if (s) {
+      s.emit('kicked', { roomId: normRoomId, reason })
+      s.leave(channelName(normRoomId))
+      s.data.roomId = null
+      s.data.userId = null
+    }
+  }
+  users.delete(userId)
+  if (users.size === 0) roomConnections.delete(normRoomId)
 }
 
 /** Removes server-internal fields (socketId) from a participant subdocument. */
@@ -114,6 +141,10 @@ async function handleJoin(io, socket, payload, ack) {
     room.lastActivityAt = new Date()
     await room.save()
 
+    if (participant.role === 'host') {
+      cancelHostFallback(roomId)
+    }
+
     const roomPayload = room.toJSON()
     const self = { userId: participant.userId, role: participant.role }
 
@@ -163,14 +194,37 @@ async function detachFromRoom(io, socket, { removeParticipant = false } = {}) {
     const participant = room.getParticipant(userId)
     let removed = false
 
-    if (removeParticipant && participant && participant.role !== 'host') {
-      // An explicit "Leave room" frees the seat. A dropped socket does not,
-      // so the same person can reclaim their seat after a reconnect.
+    if (removeParticipant && participant) {
+      if (participant.role === 'host') {
+        const successor = findSuccessor(room, userId)
+        if (successor) {
+          successor.role = 'host'
+          room.hostId = successor.userId
+          if (room.controllerId === userId) {
+            room.controllerId = successor.userId
+          }
+          io.to(channelName(roomId)).emit('host_transferred', {
+            roomId,
+            previousHostId: userId,
+            newHostId: successor.userId,
+            participants: room.toJSON().participants,
+            fallback: true,
+          })
+          io.to(channelName(roomId)).emit('control_changed', {
+            roomId,
+            controllerId: room.controllerId,
+            hostId: room.hostId,
+          })
+        }
+      }
       room.participants = room.participants.filter((item) => item.userId !== userId)
       removed = true
     } else if (participant) {
       participant.connected = false
       participant.socketId = null
+      if (participant.role === 'host') {
+        scheduleHostFallback(io, roomId, userId)
+      }
     }
 
     room.markActivity()
@@ -206,10 +260,24 @@ async function handleLeave(io, socket, ack) {
   return reply(ack, succeed({ roomId }))
 }
 
-function isOriginAllowed(origin) {
+function isOriginAllowed(origin, req) {
   // No Origin header: native/mobile/same-origin clients (tests, server-to-server).
   if (!origin) return true
-  return env.allowedOrigins.includes(origin)
+  if (env.allowedOrigins.includes(origin)) return true
+
+  // Allow same-origin requests where Origin matches the Host header
+  if (req?.headers?.host) {
+    try {
+      const originHost = new URL(origin).host
+      if (originHost === req.headers.host) {
+        return true
+      }
+    } catch {
+      // Ignore malformed URL
+    }
+  }
+
+  return false
 }
 
 /**
@@ -227,14 +295,17 @@ export function initWatchPartySocket(httpServer) {
     // CORS headers are only enforced by browsers, and not at all for raw
     // WebSockets, so reject disallowed origins during the handshake too.
     allowRequest: (req, callback) => {
-      if (isOriginAllowed(req.headers.origin)) return callback(null, true)
+      if (isOriginAllowed(req.headers.origin, req)) return callback(null, true)
       logger.warn(`Rejected socket handshake from origin ${req.headers.origin}`)
       return callback('origin_not_allowed', false)
     },
     maxHttpBufferSize: env.socket.maxHttpBufferSize,
   })
 
-  io.engine.on('close', stopAllHeartbeats)
+  io.engine.on('close', () => {
+    stopAllHeartbeats()
+    stopAllHostFallbacks()
+  })
 
   io.on('connection', (socket) => {
     socket.data.roomId = null
@@ -242,6 +313,7 @@ export function initWatchPartySocket(httpServer) {
     logger.info(`Socket connected: ${socket.id} (origin: ${socket.handshake.headers.origin ?? 'none'})`)
 
     attachPlaybackHandlers(io, socket)
+    attachRoleHandlers(io, socket)
 
     socket.on('join_room', (payload, ack) => {
       void handleJoin(io, socket, payload, ack)

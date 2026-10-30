@@ -1,0 +1,23 @@
+{
+  "name": "youtube-party",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Real-time YouTube Watch Party full-stack application",
+  "type": "module",
+  "scripts": {
+    "install:all": "npm --prefix backend install && npm --prefix frontend install",
+    "build": "npm --prefix frontend install && npm --prefix frontend run build && npm --prefix backend install",
+    "build:frontend": "npm --prefix frontend run build",
+    "start": "node backend/src/index.js",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "test": "npm --prefix backend test",
+    "test:roles": "npm --prefix backend run test:roles",
+    "test:sync": "npm --prefix backend run test:sync",
+    "lint:frontend": "npm --prefix frontend run lint",
+    "check:backend": "npm --prefix backend run check"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

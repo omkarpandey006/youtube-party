@@ -63,7 +63,7 @@ let host
 let guest
 
 try {
-  const created = await post('/rooms', { hostName: 'Smoke Host' })
+  const created = await post('/rooms', { hostName: 'Smoke Host', videoId: 'aqz-KE-bpKQ' })
   check('REST create room', created.status === 201, `HTTP ${created.status}`)
   roomId = created.body.data?.room?.roomId
   const hostToken = created.body.data?.token
@@ -97,6 +97,109 @@ try {
     'client-supplied role was ignored',
     guestJoin.ok && guestJoin.data.self.role === 'participant' && event.participant.role === 'participant',
   )
+
+  // --- Phase 6 Playback Synchronization Verification ---
+  const pingAck = await new Promise((resolve, reject) => {
+    host.timeout(4000).emit('clock_ping', {}, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('clock_ping returns server timestamp', pingAck.ok === true && typeof pingAck.data?.serverTime === 'number')
+
+  // Host plays video -> guest receives authoritative state
+  const guestPlayState = waitForEvent(guest, 'playback_state')
+  const hostPlayAck = await new Promise((resolve, reject) => {
+    host.timeout(4000).emit('playback_play', { position: 10.5 }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('host playback_play acknowledged', hostPlayAck.ok === true && hostPlayAck.data.status === 'playing')
+  const playState = await guestPlayState
+  check(
+    'guest received playback_state (playing)',
+    playState.status === 'playing' && playState.position >= 10.5 && playState.executeAt > playState.serverTime,
+  )
+
+  // Unauthorized guest tries to play -> rejected with forbidden
+  const unauthorizedPlay = await new Promise((resolve, reject) => {
+    guest.timeout(4000).emit('playback_play', { position: 12.0 }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('unauthorized guest play rejected with forbidden', unauthorizedPlay.ok === false && unauthorizedPlay.code === 'forbidden')
+
+  // Host seeks video -> guest receives updated position
+  const guestSeekState = waitForEvent(guest, 'playback_state')
+  const hostSeekAck = await new Promise((resolve, reject) => {
+    host.timeout(4000).emit('playback_seek', { position: 42.0 }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('host playback_seek acknowledged', hostSeekAck.ok === true && hostSeekAck.data.position === 42.0)
+  const seekState = await guestSeekState
+  check('guest received playback_state (seek 42s)', seekState.position === 42.0)
+
+  // Host pauses video -> guest receives paused status
+  const guestPauseState = waitForEvent(guest, 'playback_state')
+  const hostPauseAck = await new Promise((resolve, reject) => {
+    host.timeout(4000).emit('playback_pause', { position: 42.0 }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('host playback_pause acknowledged', hostPauseAck.ok === true && hostPauseAck.data.status === 'paused')
+  const pauseState = await guestPauseState
+  check('guest received playback_state (paused)', pauseState.status === 'paused')
+
+  // Host changes video -> guest receives new videoId
+  const guestChangeState = waitForEvent(guest, 'playback_state')
+  const hostChangeAck = await new Promise((resolve, reject) => {
+    host.timeout(4000).emit('playback_change_video', { videoId: 'dQw4w9WgXcQ' }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('host playback_change_video acknowledged', hostChangeAck.ok === true && hostChangeAck.data.videoId === 'dQw4w9WgXcQ')
+  const changeState = await guestChangeState
+  check('guest received playback_state (new videoId & reset 0s)', changeState.videoId === 'dQw4w9WgXcQ' && changeState.position === 0)
+
+  // --- Phase 7 Roles & Permissions Verification ---
+  // Guest (participant) calls host-only assign_role -> forbidden
+  const forbiddenAssign = await new Promise((resolve, reject) => {
+    guest.timeout(4000).emit('assign_role', { userId: guestId, role: 'moderator' }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('guest assign_role rejected with forbidden', forbiddenAssign.ok === false && forbiddenAssign.code === 'forbidden')
+
+  // Guest (participant) tries to remove someone -> forbidden
+  const forbiddenRemove = await new Promise((resolve, reject) => {
+    guest.timeout(4000).emit('remove_participant', { userId: hostJoin.data.self.userId }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('guest remove_participant rejected with forbidden', forbiddenRemove.ok === false && forbiddenRemove.code === 'forbidden')
+
+  // Host promotes guest to moderator
+  const guestRoleAssignedEvent = waitForEvent(guest, 'role_assigned')
+  const hostAssignAck = await new Promise((resolve, reject) => {
+    host.timeout(4000).emit('assign_role', { userId: guestId, role: 'moderator' }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('host assign_role (moderator) acknowledged', hostAssignAck.ok === true && hostAssignAck.data.role === 'moderator')
+  const roleAssignedPayload = await guestRoleAssignedEvent
+  check('guest received role_assigned (moderator)', roleAssignedPayload.userId === guestId && roleAssignedPayload.role === 'moderator')
+
+  // Moderator CAN now control playback (Moderator plays video)
+  const hostModPlayEvent = waitForEvent(host, 'playback_state')
+  const modPlayAck = await new Promise((resolve, reject) => {
+    guest.timeout(4000).emit('playback_play', { position: 15.0 }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('moderator playback_play accepted', modPlayAck.ok === true && modPlayAck.data.status === 'playing')
+  const hostReceivedModPlay = await hostModPlayEvent
+  check('host received playback_state from moderator play', hostReceivedModPlay.status === 'playing')
+
+  // Moderator tries to assign role -> forbidden (only host can assign roles)
+  const modAssignForbidden = await new Promise((resolve, reject) => {
+    guest.timeout(4000).emit('assign_role', { userId: guestId, role: 'participant' }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('moderator assign_role rejected with forbidden', modAssignForbidden.ok === false && modAssignForbidden.code === 'forbidden')
+
+  // Moderator tries to remove someone -> forbidden (only host can remove participants)
+  const modRemoveForbidden = await new Promise((resolve, reject) => {
+    guest.timeout(4000).emit('remove_participant', { userId: hostJoin.data.self.userId }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('moderator remove_participant rejected with forbidden', modRemoveForbidden.ok === false && modRemoveForbidden.code === 'forbidden')
+
+  // Host transfers host status to guest
+  const guestHostTransferredEvent = waitForEvent(guest, 'host_transferred')
+  const hostTransferAck = await new Promise((resolve, reject) => {
+    host.timeout(4000).emit('transfer_host', { userId: guestId }, (err, res) => (err ? reject(err) : resolve(res)))
+  })
+  check('host transfer_host acknowledged', hostTransferAck.ok === true && hostTransferAck.data.hostId === guestId)
+  const hostTransferredPayload = await guestHostTransferredEvent
+  check('guest received host_transferred event', hostTransferredPayload.newHostId === guestId)
 
   const leftEvent = waitForEvent(host, 'participant_left')
   guest.disconnect()

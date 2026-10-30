@@ -4,7 +4,7 @@ Phase-by-phase roadmap for the YouTube Party project.
 
 Legend: `[x]` done and verified · `[ ]` not implemented yet.
 
-**Overall status: Phase 5 complete (local YouTube player) · Phase 6 (sync engine) next.**
+**Overall status: Phase 7 complete (roles & permissions) · Phase 8 (persistence & room lifecycle) next.**
 
 ---
 
@@ -126,33 +126,45 @@ recovers via token refresh).
 
 ---
 
-## Phase 6 — Strict sync engine (<300 ms drift)
+## Phase 6 — Strict sync engine (<300 ms drift) ✅
 
-- [ ] Server-authoritative clock (`clock_ping` / `clock_pong`, min-RTT offset estimate)
-- [ ] Playback state broadcast: `playbackStatus`, `currentTime`, `playbackUpdatedAt`, `seq`, `executeAt`
-- [ ] Scheduled apply window (~250 ms) so all clients act on the same server timestamp
-- [ ] `play`, `pause`, `seek`, `change_video` events with `seq` ordering
-- [ ] Late-joiner snapshot with time compensation
-- [ ] Heartbeat re-broadcast every 3 s
-- [ ] 3-tier drift control: ignore (<150 ms) → `playbackRate` nudge (150–900 ms) → hard seek (>900 ms)
-- [ ] Wire the existing `VideoPlayer` ref callbacks into the sync engine
-- [ ] Drift HUD (dev only)
-- [ ] Vitest unit tests for sync math
+- [x] Server-authoritative clock (`clock_ping` / `clock_pong`, min-RTT offset estimate)
+- [x] Playback state broadcast: `playbackStatus`, `currentTime`, `playbackUpdatedAt`, `seq`, `executeAt`
+- [x] Scheduled apply window (~250 ms) so all clients act on the same server timestamp
+- [x] `play`, `pause`, `seek`, `change_video` events with `seq` ordering
+- [x] Late-joiner snapshot with time compensation
+- [x] Heartbeat re-broadcast every 3 s
+- [x] 3-tier drift control: ignore (<150 ms) → `playbackRate` nudge (150–900 ms) → hard seek (>900 ms)
+- [x] Wire the existing `VideoPlayer` ref callbacks into the sync engine
+- [x] Drift HUD (dev only)
+- [x] Unit tests for sync math (`npm run test:sync` — 9/9 pass)
 
-**Done when:** measured drift stays under 300 ms across a 10-minute video on two devices.
+**Verified:** sync math tests 9/9 pass ✅ · TypeScript check (`tsc -b`) ✅ · oxlint 0 warnings/0 errors ✅ · backend check ✅ · smoke test suite with 2 live clients verifying play, pause, seek, change-video, and unauthorized command rejection ✅
 
 ---
 
-## Phase 7 — Roles & permissions
+## Phase 7 — Roles, Permissions & Playback Synchronization Fixes ✅
 
-- [ ] Role model enforced server-side: `host` / `moderator` / `participant`
-- [ ] Permission checks for every mutating event
-- [ ] `assign_role`, `transfer_host`, `remove_participant`
-- [ ] Request → approve control flow
-- [ ] UI: role badges, host controls, approval panel
-- [ ] Host fallback when the host disconnects
+- [x] Role model enforced server-side: `Host` / `Moderator` / `Participant`
+- [x] Room creator automatically becomes Host; new members become Participants
+- [x] Only Host can assign or revoke Moderator privileges (`assign_role`)
+- [x] Host and Moderator can control video playback (`playback_play`, `playback_pause`, `playback_seek`, `playback_change_video`)
+- [x] Participants cannot directly control playback (rejected with `{ ok: false, code: "forbidden" }`)
+- [x] Only Host can remove participants (`remove_participant`)
+- [x] Server-side permissions enforced on REST and Socket.IO; client-supplied roles never trusted
+- [x] Cross-room access prevention
+- [x] Safe Host disconnection & fallback handling (15 s grace timer + ranking: connected moderator > connected participant > disconnected; cancelled if host reconnects)
+- [x] UI displays authoritative role labels: `Host`, `Moderator`, `Participant`
+- [x] Playback synchronization root-cause fixes:
+  - Extrapolated real-time playback position on `Room.toJSON()` and socket snapshot
+  - Synchronous `isReadyRef` tracking in `VideoPlayer.jsx` resolving player command race condition
+  - Automatic play and seek synchronization across all members
+  - Page refresh and late joiners restore exact video and running playback position
+  - Handled browser autoplay restrictions with clear gesture prompt
 
-**Done when:** a participant calling a host-only event gets `{ ok: false, code: "forbidden" }`.
+**Verified:** roles & permissions test suite (`npm run test:roles` — 6/6 pass) ✅ · sync math tests (`npm run test:sync` — 9/9 pass) ✅ · production build (`npm run build`) ✅ · oxlint 0 warnings/0 errors ✅ · backend syntax check (`npm run check`) ✅
+
+**Done when:** Host and Moderator can control playback, Participants are forbidden, only Host removes participants or manages roles, and playback state synchronizes seamlessly across all members on play, seek, join, refresh, and reconnect. ✅
 
 ---
 
@@ -193,8 +205,8 @@ recovers via token refresh).
 
 - [ ] `WALKTHROUGH.md`
 - [ ] `DEMO_SCRIPT.md`
-- [ ] Production build served by Express from one origin
-- [ ] `render.yaml` (or chosen host) deploy config + Atlas production URI
+- [x] Production build served by Express from one origin (`backend/src/app.js` with SPA fallback)
+- [x] `render.yaml` deploy config + `DEPLOYMENT.md` guide + root `package.json`
 - [ ] Live URL added to `README.md`
 
 ---

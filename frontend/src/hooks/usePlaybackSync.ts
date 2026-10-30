@@ -22,13 +22,12 @@ const CLOCK_SAMPLES = 5
 const CLOCK_SAMPLE_GAP_MS = 150
 const CLOCK_REFRESH_MS = 30_000
 const MAX_SCHEDULE_MS = 3000
-const GESTURE_CHECK_MS = 800
+const GESTURE_CHECK_MS = 2500
 
 interface UsePlaybackSyncArgs {
   roomId: string
-  userId: string
   initialVideoId: string | null
-  initialControllerId: string | null
+  canControl: boolean
   playerRef: RefObject<VideoPlayerHandle | null>
 }
 
@@ -42,12 +41,13 @@ export interface UsePlaybackSyncResult {
   needsGesture: boolean
   error: string | null
   onPlayerReady: () => void
+  onPlayerStateChange: (payload: { state: number }) => void
+  onPlayerEnded: () => void
   onTimeUpdate: (payload: { currentTime: number; duration: number }) => void
   requestPlay: () => void
   requestPause: () => void
   requestSeek: (seconds: number) => void
   requestChangeVideo: (videoId: string) => void
-  requestGrantControl: (userId: string) => void
   enablePlayback: () => void
 }
 
@@ -65,9 +65,8 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
  */
 export function usePlaybackSync({
   roomId,
-  userId,
   initialVideoId,
-  initialControllerId,
+  canControl,
   playerRef,
 }: UsePlaybackSyncArgs): UsePlaybackSyncResult {
   const socketRef = useRef<WatchPartySocket | null>(null)
@@ -83,9 +82,11 @@ export function usePlaybackSync({
   const rateResetRef = useRef<number | null>(null)
   const driftStampRef = useRef(0)
   const gestureTimerRef = useRef<number | null>(null)
+  const seekGraceUntilRef = useRef(0)
+  const playRetryTimerRef = useRef<number | null>(null)
 
   const [videoId, setVideoId] = useState<string | null>(initialVideoId)
-  const [controllerId, setControllerId] = useState<string | null>(initialControllerId)
+  const [controllerId, setControllerId] = useState<string | null>(null)
   const [status, setStatus] = useState<PlaybackStatus>('paused')
   const [driftMs, setDriftMs] = useState<number | null>(null)
   const [seq, setSeq] = useState(0)
@@ -125,7 +126,17 @@ export function usePlaybackSync({
       const state = player.getPlayerState()
       const expectedPlaying = latestRef.current?.status === 'playing'
       // 1 = playing, 3 = buffering
-      setNeedsGesture(Boolean(expectedPlaying) && state !== 1 && state !== 3)
+      if (expectedPlaying && state !== 1 && state !== 3) {
+        // Try calling play once more before showing user gesture banner
+        player.play()
+        const retryTimer = window.setTimeout(() => {
+          const secondState = player.getPlayerState()
+          setNeedsGesture(Boolean(expectedPlaying) && secondState !== 1 && secondState !== 3)
+        }, 1200)
+        gestureTimerRef.current = retryTimer
+      } else {
+        setNeedsGesture(false)
+      }
     }, GESTURE_CHECK_MS)
   }, [playerRef])
 
@@ -134,7 +145,7 @@ export function usePlaybackSync({
     (payload: PlaybackStatePayload) => {
       if (payload.seq < appliedSeqRef.current) return
       const player = playerRef.current
-      if (!player) {
+      if (!player || (typeof player.isReady === 'function' && !player.isReady())) {
         pendingRef.current = payload
         return
       }
@@ -148,10 +159,13 @@ export function usePlaybackSync({
       const drift = local - expected
       const isCommand = !payload.heartbeat && !payload.snapshot
 
-      if (isCommand || Math.abs(drift) > HARD_DRIFT_SECONDS) {
-        if (isCommand || Math.abs(drift) > 0.05) {
-          player.seekTo(Math.max(0, expected))
-        }
+      // Hard seek if drift is large, or if an explicit command arrived and position changed noticeably
+      const shouldHardSeek =
+        Math.abs(drift) > HARD_DRIFT_SECONDS || (isCommand && Math.abs(drift) > 0.4)
+
+      if (shouldHardSeek) {
+        seekGraceUntilRef.current = Date.now() + 2000
+        player.seekTo(Math.max(0, expected))
         setRate(1)
         clearRateTimer()
       } else if (payload.status === 'playing' && Math.abs(drift) > SOFT_DRIFT_SECONDS) {
@@ -161,8 +175,25 @@ export function usePlaybackSync({
 
       if (payload.status === 'playing') {
         player.play()
+        if (playRetryTimerRef.current !== null) {
+          window.clearTimeout(playRetryTimerRef.current)
+        }
+        // If an async seek was issued, ensure play is re-confirmed once seeking buffers
+        playRetryTimerRef.current = window.setTimeout(() => {
+          playRetryTimerRef.current = null
+          if (latestRef.current?.status === 'playing') {
+            const p = playerRef.current
+            if (p && p.getPlayerState() !== 1 && p.getPlayerState() !== 3) {
+              p.play()
+            }
+          }
+        }, 400)
         checkAutoplay()
       } else {
+        if (playRetryTimerRef.current !== null) {
+          window.clearTimeout(playRetryTimerRef.current)
+          playRetryTimerRef.current = null
+        }
         player.pause()
         setRate(1)
         clearRateTimer()
@@ -300,23 +331,63 @@ export function usePlaybackSync({
     [report],
   )
 
-  const requestGrantControl = useCallback(
-    (targetUserId: string) => {
-      socketRef.current?.emit('playback_grant_control', { userId: targetUserId }, report)
-    },
-    [report],
-  )
-
   const onPlayerReady = useCallback(() => {
     const pending = pendingRef.current
     pendingRef.current = null
-    if (!pending) return
-    // Give the IFrame a beat to expose duration before seeking.
-    window.setTimeout(() => applyToPlayer(pending), 120)
-  }, [applyToPlayer])
+    if (pending) {
+      applyToPlayer(pending)
+    } else if (latestRef.current) {
+      applyToPlayer(latestRef.current)
+    } else {
+      requestSnapshot()
+    }
+  }, [applyToPlayer, requestSnapshot])
+
+  const onPlayerEnded = useCallback(() => {
+    if (canControl) {
+      const player = playerRef.current
+      const duration = player?.getDuration() ?? 0
+      socketRef.current?.emit('playback_ended', { position: duration }, report)
+    }
+  }, [canControl, playerRef, report])
+
+  const onPlayerStateChange = useCallback(
+    ({ state }: { state: number }) => {
+      const latest = latestRef.current
+      if (!latest) return
+
+      if (latest.status === 'playing') {
+        if (state === 1 || state === 3) {
+          setNeedsGesture(false)
+          if (gestureTimerRef.current !== null) {
+            window.clearTimeout(gestureTimerRef.current)
+            gestureTimerRef.current = null
+          }
+        } else if (state === 2 || state === 5 || state === -1) {
+          // If seek or buffering finished and YouTube left the player paused while room is playing,
+          // auto-resume immediately!
+          const p = playerRef.current
+          if (p) {
+            p.play()
+          }
+        }
+      } else if (latest.status === 'paused') {
+        if (state === 1 || state === 3) {
+          const p = playerRef.current
+          if (p) {
+            p.pause()
+          }
+        }
+      }
+    },
+    [playerRef],
+  )
 
   const onTimeUpdate = useCallback(
     ({ currentTime }: { currentTime: number }) => {
+      // If we recently initiated a seek, give the player 2 seconds to buffer without interfering
+      if (Date.now() < seekGraceUntilRef.current) return
+
       const latest = latestRef.current
       if (!latest || latest.status !== 'playing') return
 
@@ -332,11 +403,10 @@ export function usePlaybackSync({
       }
 
       if (Math.abs(drift) > HARD_DRIFT_SECONDS) {
-        if (player.getPlayerState() === 1) {
-          player.seekTo(Math.max(0, expected))
-          setRate(1)
-          clearRateTimer()
-        }
+        seekGraceUntilRef.current = Date.now() + 2000
+        player.seekTo(Math.max(0, expected))
+        setRate(1)
+        clearRateTimer()
       } else if (Math.abs(drift) > SOFT_DRIFT_SECONDS) {
         setRate(drift > 0 ? 1 - RATE_STEP : 1 + RATE_STEP)
         scheduleRateReset()
@@ -392,9 +462,11 @@ export function usePlaybackSync({
       if (scheduleRef.current !== null) window.clearTimeout(scheduleRef.current)
       if (rateResetRef.current !== null) window.clearTimeout(rateResetRef.current)
       if (gestureTimerRef.current !== null) window.clearTimeout(gestureTimerRef.current)
+      if (playRetryTimerRef.current !== null) window.clearTimeout(playRetryTimerRef.current)
       scheduleRef.current = null
       rateResetRef.current = null
       gestureTimerRef.current = null
+      playRetryTimerRef.current = null
       socketRef.current = null
       releaseWatchPartySocket()
     }
@@ -404,18 +476,19 @@ export function usePlaybackSync({
     videoId,
     controllerId,
     status,
-    canControl: Boolean(controllerId) && controllerId === userId,
+    canControl,
     driftMs,
     seq,
     needsGesture,
     error,
     onPlayerReady,
+    onPlayerStateChange,
+    onPlayerEnded,
     onTimeUpdate,
     requestPlay,
     requestPause,
     requestSeek,
     requestChangeVideo,
-    requestGrantControl,
     enablePlayback,
   }
 }

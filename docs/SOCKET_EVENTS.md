@@ -1,4 +1,4 @@
-# Socket Events (Phase 4)
+# Socket Events (Phase 4 Presence & Phase 6 Playback Sync)
 
 Socket.IO server runs on the **same HTTP server and port** as the REST API
 (`http://localhost:5000`), default path `/socket.io`.
@@ -11,9 +11,8 @@ Socket.IO server runs on the **same HTTP server and port** as the REST API
 | Max message size | `SOCKET_MAX_BUFFER_BYTES` (default 100 kB) |
 | Server client bundle | Disabled (`serveClient: false`) |
 
-> **Phase 4 scope:** joining/leaving presence only. No playback sync events yet —
-> the room video plays locally per participant ([PLAYER.md](./PLAYER.md)); sync
-> events arrive in Phase 6.
+> **Scope:** joining/leaving presence (Phase 4) and authoritative playback synchronization (Phase 6).
+> Video playback is synchronized across all participants within <300 ms drift.
 
 ---
 
@@ -230,9 +229,200 @@ development backdoor is enabled in production.
 
 ---
 
+## Playback Synchronization (Phase 6)
+
+Authoritative real-time video synchronization between all participants in a room.
+
+### Architecture & Clock Synchronization
+1. **Clock Estimation (`clock_ping`)**:
+   Clients periodically ping the server with `clock_ping`. By measuring minimum round-trip time (`rtt`), the client estimates its clock offset against the server:
+   $$\text{offset} = \text{serverTime} - \frac{\text{sentAt} + \text{receivedAt}}{2}$$
+2. **Scheduled Apply Window (`executeAt`)**:
+   When a playback command is issued, the server bumps `seq`, records `updatedAt = Date.now()`, and broadcasts with:
+   $$\text{executeAt} = \text{serverTime} + 250\text{ ms}$$
+   All clients schedule execution at `executeAt - serverNow()`, eliminating network transit jitter.
+3. **Late-Joiner Compensation**:
+   When a user connects, the server calculates:
+   $$\text{elapsed} = \max(0, (\text{now} - \text{playbackUpdatedAt}) / 1000)$$
+   $$\text{position} = \text{currentTime} + \text{elapsed}$$
+   The late joiner immediately seeks to the current video position without manual scrubbing.
+4. **3-Tier Drift Correction (Heartbeat every 3s)**:
+   * **Tier 1 (<150 ms)**: Ignored (imperceptible to human ear/eye).
+   * **Tier 2 (150 ms – 900 ms)**: Smooth adjustment: player speed is nudged to `1.05x` or `0.95x` for up to 4s to catch up without audio pitch distortion or frame freezing.
+   * **Tier 3 (>900 ms)**: Hard seek to the authoritative position.
+
+### Playback Client → Server Events
+
+#### `clock_ping`
+Requests the authoritative server timestamp for RTT clock estimation.
+```ts
+socket.emit('clock_ping', {}, (ack) => {
+  // ack.data.serverTime
+})
+```
+
+#### `playback_request_state`
+Requests the current authoritative snapshot (used during initial mount or reconnection).
+```ts
+socket.emit('playback_request_state', {}, (ack) => {})
+```
+
+#### `playback_play`
+Starts playback at the specified position.
+```ts
+socket.emit('playback_play', { position: 42.5 }, (ack) => {})
+```
+
+#### `playback_pause`
+Pauses playback at the specified position.
+```ts
+socket.emit('playback_pause', { position: 42.5 }, (ack) => {})
+```
+
+#### `playback_seek`
+Seeks playback to the specified position.
+```ts
+socket.emit('playback_seek', { position: 120.0 }, (ack) => {})
+```
+
+#### `playback_ended`
+Notifies that the video finished playing.
+```ts
+socket.emit('playback_ended', { position: 240.0 }, (ack) => {})
+```
+
+#### `playback_change_video`
+Loads a new YouTube video id in the room and resets position to `0`.
+```ts
+socket.emit('playback_change_video', { videoId: 'aqz-KE-bpKQ' }, (ack) => {})
+```
+
+#### `playback_grant_control`
+Host transfers playback controller rights to another participant, or reclaims it.
+```ts
+socket.emit('playback_grant_control', { userId: 'target-user-id' }, (ack) => {})
+```
+
+### Playback Server → Client Broadcasts
+
+#### `playback_state`
+Emitted to `room:<roomId>` on every playback mutation, join snapshot, and 3-second heartbeat.
+```json
+{
+  "roomId": "6NFTFS",
+  "videoId": "aqz-KE-bpKQ",
+  "status": "playing",
+  "position": 42.5,
+  "seq": 4,
+  "serverTime": 1761800000000,
+  "updatedAt": 1761800000000,
+  "controllerId": "8218af8d-...",
+  "executeAt": 1761800000250,
+  "heartbeat": false,
+  "snapshot": false
+}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `roomId` | string | Target room identifier |
+| `videoId` | string \| null | Current YouTube 11-char video ID |
+| `status` | `'paused' \| 'playing' \| 'ended'` | Authoritative playback status |
+| `position` | number | Position in seconds at `updatedAt` |
+| `seq` | number | Strictly increasing sequence number (stale packets with lower seq are dropped) |
+| `serverTime` | number | Server epoch millisecond when packet was generated |
+| `updatedAt` | number | Server epoch millisecond when position anchor was saved |
+| `controllerId` | string | User ID authorized to control playback |
+| `executeAt` | number | Scheduled execution epoch timestamp |
+| `heartbeat` | boolean? | `true` if broadcast originated from the 3-second periodic timer |
+| `snapshot` | boolean? | `true` if sent as a snapshot to a connecting/reconnecting socket |
+
+#### `control_changed`
+Emitted when playback control is transferred:
+```json
+{
+  "roomId": "6NFTFS",
+  "controllerId": "target-user-id",
+  "hostId": "host-user-id"
+}
+```
+
+---
+
+## Phase 7 — Roles & Permissions Events
+
+Three distinct roles: `host`, `moderator`, and `participant`.
+- Room creator automatically becomes `host`.
+- New members automatically become `participant`.
+- `host` and `moderator` can control video playback (`playback_play`, `playback_pause`, `playback_seek`, `playback_change_video`).
+- `participant` cannot directly control playback (commands rejected with `{ ok: false, code: "forbidden" }`).
+- Only `host` can assign or revoke `moderator` privileges.
+- Only `host` can remove participants.
+
+### Client → Server Events
+
+#### `assign_role`
+Only the **host** can promote or demote participants between `moderator` and `participant`.
+```ts
+socket.emit('assign_role', { userId: 'target-user-id', role: 'moderator' }, (ack) => {})
+```
+* **Forbidden if:** caller is not the host, or target is the host.
+* **Ack:** `{ ok: true, data: { userId, role, participants } }`
+
+#### `transfer_host`
+The **host** transfers full room ownership to another participant. The previous host becomes a `moderator`.
+```ts
+socket.emit('transfer_host', { userId: 'target-user-id' }, (ack) => {})
+```
+* **Forbidden if:** caller is not the host, or target is self.
+* **Ack:** `{ ok: true, data: { hostId, participants } }`
+
+#### `remove_participant`
+Only the **host** can remove participants from the room.
+```ts
+socket.emit('remove_participant', { userId: 'target-user-id' }, (ack) => {})
+```
+* **Forbidden if:** caller is not the host, or target is self/host.
+* **Ack:** `{ ok: true, data: { userId, removed: true, participants } }`
+
+### Server → Client Broadcasts
+
+#### `role_assigned`
+Emitted when a participant's role is updated.
+```json
+{
+  "roomId": "6NFTFS",
+  "userId": "target-user-id",
+  "role": "moderator",
+  "participants": ["..."]
+}
+```
+
+#### `host_transferred`
+Emitted when host ownership changes (manual transfer or disconnect fallback).
+```json
+{
+  "roomId": "6NFTFS",
+  "previousHostId": "old-host-id",
+  "newHostId": "new-host-id",
+  "participants": ["..."],
+  "fallback": false
+}
+```
+
+#### `kicked`
+Emitted directly to the disconnected sockets of an evicted participant.
+```json
+{
+  "roomId": "6NFTFS",
+  "reason": "You were removed from the room by the host."
+}
+```
+
+---
+
 ## Not implemented yet
 
-- Playback sync events (`play`, `pause`, `seek`, `change_video`, `sync_state`)
-- Role management (`assign_role`, `transfer_host`)
-- Chat / reactions
-- Rate limiting per socket (planned for the quality phase)
+- Chat / reactions (Phase 9)
+- Debounced persistence & room lifecycle (Phase 8)
+- Rate limiting per socket

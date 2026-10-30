@@ -656,3 +656,36 @@
 .join-card .form {
   margin-top: 1.25rem;
 }
+
+/* --- Roles UI ------------------------------------------------------------- */
+
+.participant-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.participant-action-btn {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 0.15rem 0.38rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.participant-action-btn:hover {
+  color: var(--text);
+  border-color: var(--muted);
+  background: var(--surface-2);
+}
+
+.participant-action-btn-danger:hover {
+  color: #ff8a80;
+  border-color: rgba(255, 59, 48, 0.45);
+  background: rgba(255, 59, 48, 0.12);
+}

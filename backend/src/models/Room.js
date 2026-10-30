@@ -172,6 +172,13 @@ const roomSchema = new Schema(
         if (Array.isArray(ret.participants)) {
           ret.participants = ret.participants.map(({ socketId, ...participant }) => participant)
         }
+        // Extrapolate real-time position for playing rooms so REST responses are up-to-date
+        if (ret.playbackStatus === 'playing' && ret.playbackUpdatedAt) {
+          const now = Date.now()
+          const updatedAt = new Date(ret.playbackUpdatedAt).getTime()
+          const elapsed = Math.max(0, (now - updatedAt) / 1000)
+          ret.currentTime = Math.round(((Number(ret.currentTime) || 0) + elapsed) * 1000) / 1000
+        }
         return ret
       },
     },
@@ -196,11 +203,30 @@ roomSchema.pre('validate', function ensureHostIsAParticipant() {
 })
 
 roomSchema.methods.isHost = function isHost(userId) {
-  return this.hostId === userId
+  return Boolean(userId) && this.hostId === userId
+}
+
+roomSchema.methods.isModerator = function isModerator(userId) {
+  if (!userId) return false
+  const participant = this.getParticipant(userId)
+  return participant?.role === 'moderator'
+}
+
+roomSchema.methods.canModerate = function canModerate(userId) {
+  return this.isHost(userId) || this.isModerator(userId)
 }
 
 roomSchema.methods.isPlaybackController = function isPlaybackController(userId) {
   return (this.controllerId || this.hostId) === userId
+}
+
+roomSchema.methods.canControlPlayback = function canControlPlayback(userId) {
+  if (!userId) return false
+  return this.isHost(userId) || this.isModerator(userId)
+}
+
+roomSchema.methods.canRemoveParticipant = function canRemoveParticipant(userId) {
+  return this.isHost(userId)
 }
 
 roomSchema.methods.getParticipant = function getParticipant(userId) {

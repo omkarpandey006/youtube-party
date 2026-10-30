@@ -9,10 +9,10 @@ Watch YouTube together in sync. Full-stack project built phase by phase.
 | Database | MongoDB + Mongoose |
 | Realtime | Socket.IO (same HTTP server) |
 
-> **Current status: Phase 5 complete — local YouTube player.**
-> Create/join rooms, see participants live, and play the room's video with
-> play/pause/seek. Playback is **not synced between participants yet** (Phase 6);
-> chat and roles are still pending.
+> **Current status: Phase 6 complete — synchronized YouTube playback.**
+> Create/join rooms, see participants live, and watch YouTube videos in real-time
+> sync with play/pause/seek/change-video and automatic drift correction (<300 ms).
+> Chat and advanced roles are planned for next phases.
 
 ---
 

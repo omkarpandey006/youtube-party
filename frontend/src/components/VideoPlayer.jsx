@@ -62,6 +62,8 @@ const VideoPlayer = forwardRef(function VideoPlayer(
     onStateChange,
     onTimeUpdate,
     onError,
+    onEnded,
+    onLocalPlay,
     onUserPlay,
     onUserPause,
     onUserSeek,
@@ -79,6 +81,8 @@ const VideoPlayer = forwardRef(function VideoPlayer(
       onStateChange,
       onTimeUpdate,
       onError,
+      onEnded,
+      onLocalPlay,
       onUserPlay,
       onUserPause,
       onUserSeek,
@@ -96,6 +100,7 @@ const VideoPlayer = forwardRef(function VideoPlayer(
   const [duration, setDuration] = useState(0)
   const [attempt, setAttempt] = useState(0)
   const [seekDraft, setSeekDraft] = useState(null)
+  const isReadyRef = useRef(false)
 
   useImperativeHandle(
     ref,
@@ -108,6 +113,8 @@ const VideoPlayer = forwardRef(function VideoPlayer(
       getPlayerState: () => playerRef.current?.getPlayerState?.() ?? PLAYER_STATE.UNSTARTED,
       setPlaybackRate: (rate) => playerRef.current?.setPlaybackRate?.(rate),
       getPlaybackRate: () => playerRef.current?.getPlaybackRate?.() ?? 1,
+      isReady: () =>
+        Boolean(isReadyRef.current && playerRef.current && typeof playerRef.current.playVideo === 'function'),
     }),
     [],
   )
@@ -156,11 +163,18 @@ const VideoPlayer = forwardRef(function VideoPlayer(
             rel: 0,
             playsinline: 1,
             iv_load_policy: 3,
+            enablejsapi: 1,
+            origin: typeof window !== 'undefined' ? window.location.origin : undefined,
           },
           events: {
             onReady: (event) => {
               if (cancelled) return
+              const iframe = container.querySelector('iframe')
+              if (iframe) {
+                iframe.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture')
+              }
               playerRef.current = event.target
+              isReadyRef.current = true
               setStatus('ready')
               setDuration(event.target.getDuration?.() ?? 0)
               startTicker()
@@ -170,6 +184,9 @@ const VideoPlayer = forwardRef(function VideoPlayer(
               if (cancelled) return
               setPlayerState(event.data)
               callbacksRef.current.onStateChange?.({ state: event.data })
+              if (event.data === PLAYER_STATE.ENDED) {
+                callbacksRef.current.onEnded?.()
+              }
             },
             onError: (event) => {
               if (cancelled) return
@@ -195,6 +212,7 @@ const VideoPlayer = forwardRef(function VideoPlayer(
 
     return () => {
       cancelled = true
+      isReadyRef.current = false
       stopTicker()
       const player = playerRef.current
       playerRef.current = null
@@ -213,6 +231,7 @@ const VideoPlayer = forwardRef(function VideoPlayer(
     : error
 
   const retry = () => {
+    isReadyRef.current = false
     setStatus('loading')
     setError(null)
     setCurrentTime(0)
@@ -230,7 +249,16 @@ const VideoPlayer = forwardRef(function VideoPlayer(
   const canInteract = canControl && visibleStatus === 'ready'
 
   const togglePlayback = () => {
-    if (!canInteract) return
+    if (!canInteract) {
+      if (visibleStatus === 'ready' && !isPlaying) {
+        if (callbacksRef.current.onLocalPlay) {
+          callbacksRef.current.onLocalPlay()
+        } else {
+          playerRef.current?.playVideo?.()
+        }
+      }
+      return
+    }
 
     if (synced) {
       if (playerState === PLAYER_STATE.PLAYING) onUserPause?.()
@@ -300,9 +328,9 @@ const VideoPlayer = forwardRef(function VideoPlayer(
           type="button"
           className="button button-sm player-toggle"
           onClick={togglePlayback}
-          disabled={!canInteract}
+          disabled={visibleStatus !== 'ready' || (!canControl && isPlaying)}
           aria-label={isPlaying ? 'Pause video' : 'Play video'}
-          title={canControl ? undefined : 'Only the playback controller can use this'}
+          title={canControl ? undefined : isPlaying ? 'Watching in sync' : 'Click to start video'}
         >
           {isPlaying ? 'Pause' : 'Play'}
         </button>
